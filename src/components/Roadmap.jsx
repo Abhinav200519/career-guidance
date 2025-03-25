@@ -15,9 +15,15 @@ const Roadmap = ({ jobTitle, currentGrade }) => {
     setRoadmap([]); // Reset roadmap on new request
 
     try {
-      // Clean the jobTitle by removing numbering and extra formatting
-      const cleanJobTitle = jobTitle.replace(/^\d+\.\s*\*\*|\*\*.*$/, "").trim();
-      const prompt = `Create a concise roadmap for a grade ${currentGrade} student in India to become a ${cleanJobTitle}. Provide exactly 5 key steps in bullet point format, with each line starting with "- " followed by the step description (e.g., "- Complete 10th grade with strong science scores"). Include important exams (e.g., NEET) and top colleges (e.g., AIIMS) where applicable. Do not include any introductory text, extra formatting, or steps outside the 5-key range. Respond only with the bullet points.`;
+      // Clean the jobTitle by removing numbering, extra formatting, and trailing colon
+      const cleanJobTitle = jobTitle
+        .replace(/^\d+\.\s*\*\*|\*\*/g, "") // Remove numbering and ** markers
+        .replace(/:.*$/, "") // Remove trailing colon and anything after it
+        .trim();
+      console.log("Cleaned Job Title:", cleanJobTitle); // Log the cleaned job title
+
+      // Adjust the prompt to handle a broader range of careers
+      const prompt = `Create a concise roadmap for a grade ${currentGrade} student to become a ${cleanJobTitle}. Provide exactly 5 key steps in bullet point format, with each line starting with "- " followed by the step description (e.g., "- Complete 10th grade with strong science scores"). If the career is specific to India (e.g., Medical Researcher), include important exams (e.g., NEET) and top colleges (e.g., AIIMS) where applicable. If the career is not specific to India (e.g., Enlisted Soldier), provide a general roadmap suitable for an international context, tailored for a student of the given grade. Do not include any introductory text, extra formatting, or steps outside the 5-key range. Respond only with the bullet points.`;
       console.log("Sending prompt to Gemini API:", prompt); // Log the prompt
 
       const result = await model.generateContent(prompt);
@@ -59,7 +65,12 @@ const Roadmap = ({ jobTitle, currentGrade }) => {
   return (
     <div className="max-w-2xl mx-auto p-6 bg-white rounded-xl shadow-lg mt-8">
       <h3 className="text-xl font-semibold text-teal-800 mb-4">
-        Roadmap to {jobTitle.replace(/^\d+\.\s*\*\*|\*\*.*$/, "").trim()}
+        Roadmap to{" "}
+        {jobTitle
+          .replace(/^\d+\.\s*\*\*|\*\*/g, "") // Remove numbering and ** markers
+          .replace(/:.*$/, "") // Remove trailing colon and anything after it
+          .trim()}{" "}
+        (Grades {currentGrade})
       </h3>
       <button
         onClick={generateRoadmap}

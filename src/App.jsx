@@ -18,12 +18,25 @@ const App = () => {
   const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
+  // Utility function to clean job titles by removing stars
+  const cleanJobTitle = (title) => {
+    return title
+      .replace(/\*\*/g, "") // Remove all ** markers
+      .replace(/^\d+\.\s*/, "") // Remove numbering if present
+      .trim();
+  };
+
   const handleQuizComplete = (jobs) => {
     console.log("Raw jobs from Quiz:", jobs);
     const validJobs = jobs
-      .filter((job) => job.title && job.description && !job.title.includes("Given the student"))
+      .filter((job) => 
+        job.title && 
+        job.description && 
+        !job.title.includes("Given the student") && 
+        !job.title.includes("Here are") // Exclude introductory text
+      )
       .map((job) => ({
-        title: job.title.replace(/^\d+\.\s*\*\*|\*\*/g, "").trim(),
+        title: cleanJobTitle(job.title),
         description: job.description,
       }));
     console.log("Filtered valid jobs:", validJobs);
@@ -51,7 +64,7 @@ const App = () => {
           const title = line.substring(0, firstColonIndex).trim();
           const description = line.substring(firstColonIndex + 2).trim();
           return {
-            title: title.replace(/^\d+\.\s*\*\*|\*\*/g, "").trim(),
+            title: cleanJobTitle(title),
             description,
           };
         })
@@ -69,7 +82,8 @@ const App = () => {
   };
 
   const handleJobSelect = (title) => {
-    setSelectedJob(selectedJob === title ? null : title); // Toggle selection
+    const cleanedTitle = cleanJobTitle(title); // Ensure the title is cleaned before setting
+    setSelectedJob(selectedJob === cleanedTitle ? null : cleanedTitle); // Toggle selection
   };
 
   return (
@@ -105,34 +119,40 @@ const App = () => {
                 Search Results
               </h3>
               <div className="flex flex-wrap gap-4 justify-center">
-                {searchResults.map((job, index) => (
-                  <div
-                    key={`${job.title}-${index}`}
-                    className="cursor-pointer"
-                  >
-                    <JobCard
-                      title={job.title}
-                      onSelect={handleJobSelect}
-                      isSelected={selectedJob === job.title}
-                    />
-                  </div>
-                ))}
+                {searchResults.map((job, index) => {
+                  const cleanedTitle = cleanJobTitle(job.title);
+                  return (
+                    <div
+                      key={`${cleanedTitle}-${index}`}
+                      className="cursor-pointer"
+                    >
+                      <JobCard
+                        title={cleanedTitle}
+                        onSelect={() => handleJobSelect(job.title)}
+                        isSelected={selectedJob === cleanedTitle}
+                      />
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
           <div className="flex flex-wrap gap-4 justify-center">
-            {suggestedJobs.map((job, index) => (
-              <div
-                key={`${job.title}-${index}`}
-                className="cursor-pointer"
-              >
-                <JobCard
-                  title={job.title}
-                  onSelect={handleJobSelect}
-                  isSelected={selectedJob === job.title}
-                />
-              </div>
-            ))}
+            {suggestedJobs.map((job, index) => {
+              const cleanedTitle = cleanJobTitle(job.title);
+              return (
+                <div
+                  key={`${cleanedTitle}-${index}`}
+                  className="cursor-pointer"
+                >
+                  <JobCard
+                    title={cleanedTitle}
+                    onSelect={() => handleJobSelect(job.title)}
+                    isSelected={selectedJob === cleanedTitle}
+                  />
+                </div>
+              );
+            })}
           </div>
           {selectedJob && (
             <div className="mt-8">
