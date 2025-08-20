@@ -4,12 +4,14 @@ import session from 'express-session';
 import MySQLStore from 'express-mysql-session';
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
+import http from 'http';
 import db from './src/config/db.js';
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+// Try different ports if the default one is in use
+const PORT = process.env.PORT || 5002;
 
 // Middleware
 app.use(cors({
@@ -18,25 +20,15 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Add debugging middleware after express.json() middleware
-app.use((req, res, next) => {
-  console.log(`[DEBUG] ${new Date().toISOString()} - ${req.method} ${req.originalUrl}`);
-  
-  if (req.body && Object.keys(req.body).length > 0) {
-    console.log('[DEBUG] Request body:', JSON.stringify(req.body, null, 2).substring(0, 200) + (JSON.stringify(req.body).length > 200 ? '...' : ''));
-  }
-  
-  // Capture the original res.json to intercept the response
-  const originalJson = res.json;
-  res.json = function(data) {
-    console.log(`[DEBUG] Response (${res.statusCode}):`, JSON.stringify(data, null, 2).substring(0, 200) + (JSON.stringify(data).length > 200 ? '...' : ''));
-    return originalJson.call(this, data);
-  };
-  
-  next();
-});
+// Add debugging middleware only in development mode
+if (process.env.NODE_ENV === 'development') {
+  app.use((req, res, next) => {
+    console.log(`[DEBUG] ${req.method} ${req.originalUrl}`);
+    next();
+  });
+}
 
-// Session store setup
+// Session store setup - use memory store in development
 let sessionStore;
 
 // If we're using the in-memory store, use MemoryStore for sessions immediately
@@ -47,70 +39,66 @@ if (db.usingInMemoryStore) {
 } else {
   // Otherwise try to use MySQL for sessions with a fallback to MemoryStore
   try {
-    // Create a custom session store that won't fail when the database is down
     const MemoryStore = session.MemoryStore;
     const memoryFallback = new MemoryStore();
     
-    // Try to create MySQL store, but catch any errors
-    try {
-      const MySQLStoreSession = MySQLStore(session);
-      sessionStore = new MySQLStoreSession({
-        checkExpirationInterval: 900000, // 15 minutes
-        expiration: 86400000, // 1 day
-        createDatabaseTable: true,
-        schema: {
-          tableName: 'sessions',
-          columnNames: {
-            session_id: 'session_id',
-            expires: 'expires',
-            data: 'data'
-          }
+    const MySQLStoreSession = MySQLStore(session);
+    sessionStore = new MySQLStoreSession({
+      checkExpirationInterval: 900000, // 15 minutes
+      expiration: 86400000, // 1 day
+      createDatabaseTable: true,
+      schema: {
+        tableName: 'sessions',
+        columnNames: {
+          session_id: 'session_id',
+          expires: 'expires',
+          data: 'data'
         }
-      }, mysql.createPool({
-        host: process.env.DB_HOST || 'localhost',
-        user: process.env.DB_USER || 'root',
-        password: process.env.DB_PASSWORD || '',
-        database: process.env.DB_NAME || 'career_guidance',
-        connectTimeout: 3000 // Set a lower timeout for faster fallback
-      }));
-      
-      // Override the get/set/destroy methods to use memory fallback on error
-      const originalGet = sessionStore.get;
-      sessionStore.get = function(sid, cb) {
-        originalGet.call(this, sid, (err, session) => {
-          if (err) {
-            console.log("MySQL session store error, using memory fallback for get");
-            return memoryFallback.get(sid, cb);
-          }
-          cb(null, session);
-        });
-      };
-      
-      const originalSet = sessionStore.set;
-      sessionStore.set = function(sid, session, cb) {
-        originalSet.call(this, sid, session, (err) => {
-          if (err) {
-            console.log("MySQL session store error, using memory fallback for set");
-            return memoryFallback.set(sid, session, cb);
-          }
-          cb();
-        });
-      };
-      
-      const originalDestroy = sessionStore.destroy;
-      sessionStore.destroy = function(sid, cb) {
-        originalDestroy.call(this, sid, (err) => {
-          if (err) {
-            console.log("MySQL session store error, using memory fallback for destroy");
-            return memoryFallback.destroy(sid, cb);
-          }
-          cb();
-        });
-      };
-    } catch (error) {
-      console.error("Error creating MySQL session store:", error);
-      sessionStore = memoryFallback;
-    }
+      }
+    }, mysql.createPool({
+      host: process.env.DB_HOST || 'localhost',
+      user: process.env.DB_USER || 'root',
+      password: process.env.DB_PASSWORD || '',
+      database: process.env.DB_NAME || 'career_guidance',
+      connectTimeout: 2000, // Lower timeout for faster fallback
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0
+    }));
+    
+    // Override the get/set/destroy methods to use memory fallback on error
+    const originalGet = sessionStore.get;
+    sessionStore.get = function(sid, cb) {
+      originalGet.call(this, sid, (err, session) => {
+        if (err) {
+          console.log("MySQL session store error, using memory fallback for get");
+          return memoryFallback.get(sid, cb);
+        }
+        cb(null, session);
+      });
+    };
+    
+    const originalSet = sessionStore.set;
+    sessionStore.set = function(sid, session, cb) {
+      originalSet.call(this, sid, session, (err) => {
+        if (err) {
+          console.log("MySQL session store error, using memory fallback for set");
+          return memoryFallback.set(sid, session, cb);
+        }
+        cb();
+      });
+    };
+    
+    const originalDestroy = sessionStore.destroy;
+    sessionStore.destroy = function(sid, cb) {
+      originalDestroy.call(this, sid, (err) => {
+        if (err) {
+          console.log("MySQL session store error, using memory fallback for destroy");
+          return memoryFallback.destroy(sid, cb);
+        }
+        cb();
+      });
+    };
   } catch (error) {
     console.error("Error setting up session store:", error);
     const MemoryStore = session.MemoryStore;
@@ -141,44 +129,49 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ message: 'All fields are required' });
     }
     
-    const connection = await db.getConnection();
-    
-    // Check if user already exists
-    const [existingUsers] = await connection.execute(
-      'SELECT * FROM users WHERE email = ?',
-      [email]
-    );
-    
-    if (existingUsers.length > 0) {
-      connection.release();
-      return res.status(400).json({ message: 'User already exists' });
-    }
-    
-    // Create new user
-    const [result] = await connection.execute(
-      'INSERT INTO users (name, email, password, grade) VALUES (?, ?, ?, ?)',
-      [name, email, password, grade]
-    );
-    
-    connection.release();
-    
-    // Set user session
-    req.session.user = {
-      id: result.insertId,
-      name,
-      email,
-      grade
-    };
-    
-    return res.status(201).json({
-      message: 'User registered successfully',
-      user: {
+    let connection;
+    try {
+      connection = await db.getConnection();
+      
+      // Check if user already exists
+      const [existingUsers] = await connection.execute(
+        'SELECT * FROM users WHERE email = ?',
+        [email]
+      );
+      
+      if (existingUsers.length > 0) {
+        return res.status(400).json({ message: 'User already exists' });
+      }
+      
+      // Create new user
+      const [result] = await connection.execute(
+        'INSERT INTO users (name, email, password, grade) VALUES (?, ?, ?, ?)',
+        [name, email, password, grade]
+      );
+      
+      // Set user session
+      req.session.user = {
         id: result.insertId,
         name,
         email,
         grade
-      }
-    });
+      };
+      
+      return res.status(201).json({
+        message: 'User registered successfully',
+        user: {
+          id: result.insertId,
+          name,
+          email,
+          grade
+        }
+      });
+    } catch (error) {
+      console.error('Registration error:', error);
+      return res.status(500).json({ message: 'Server error', error: error.message });
+    } finally {
+      if (connection) connection.release();
+    }
   } catch (error) {
     console.error('Registration error:', error);
     return res.status(500).json({ message: 'Server error', error: error.message });
@@ -194,48 +187,54 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ message: 'Email and password are required' });
     }
     
-    const connection = await db.getConnection();
-    
-    const [users] = await connection.execute(
-      'SELECT * FROM users WHERE email = ? AND password = ?',
-      [email, password]
-    );
-    
-    connection.release();
-    
-    if (users.length === 0) {
-      // Check if user exists but password is wrong
-      const [existingUsers] = await connection.execute(
-        'SELECT * FROM users WHERE email = ?',
-        [email]
+    let connection;
+    try {
+      connection = await db.getConnection();
+      
+      const [users] = await connection.execute(
+        'SELECT * FROM users WHERE email = ? AND password = ?',
+        [email, password]
       );
       
-      if (existingUsers.length === 0) {
-        return res.status(404).json({ message: 'You are not registered. Please create an account.' });
-      } else {
-        return res.status(401).json({ message: 'Invalid credentials' });
+      if (users.length === 0) {
+        // Check if user exists but password is wrong
+        const [existingUsers] = await connection.execute(
+          'SELECT * FROM users WHERE email = ?',
+          [email]
+        );
+        
+        if (existingUsers.length === 0) {
+          return res.status(404).json({ message: 'You are not registered. Please create an account.' });
+        } else {
+          return res.status(401).json({ message: 'Invalid credentials' });
+        }
       }
-    }
-    
-    const user = users[0];
-    
-    // Set user session
-    req.session.user = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      grade: user.grade
-    };
-    
-    return res.status(200).json({
-      message: 'Login successful',
-      user: {
+      
+      const user = users[0];
+      
+      // Set user session
+      req.session.user = {
         id: user.id,
         name: user.name,
         email: user.email,
         grade: user.grade
-      }
-    });
+      };
+      
+      return res.status(200).json({
+        message: 'Login successful',
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          grade: user.grade
+        }
+      });
+    } catch (error) {
+      console.error('Login error:', error);
+      return res.status(500).json({ message: 'Server error', error: error.message });
+    } finally {
+      if (connection) connection.release();
+    }
   } catch (error) {
     console.error('Login error:', error);
     return res.status(500).json({ message: 'Server error', error: error.message });
@@ -263,16 +262,22 @@ app.post('/api/quiz/save', async (req, res) => {
     
     const { quizData, suggestedCareers } = req.body;
     const userId = req.session.user.id;
-    
+
     if (!db.usingInMemoryStore) {
-      const connection = await db.getConnection();
-      
-      await connection.execute(
-        'INSERT INTO quiz_results (user_id, quiz_data, suggested_careers) VALUES (?, ?, ?)',
-        [userId, JSON.stringify(quizData), JSON.stringify(suggestedCareers)]
-      );
-      
-      connection.release();
+      let connection;
+      try {
+        connection = await db.getConnection();
+        await connection.execute(
+          `INSERT INTO quiz_results (user_id, quiz_data, suggested_careers) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE quiz_data = VALUES(quiz_data), suggested_careers = VALUES(suggested_careers), created_at = CURRENT_TIMESTAMP`,
+          [userId, JSON.stringify(quizData), JSON.stringify(suggestedCareers)]
+        );
+      } catch (error) {
+        console.error('Error saving quiz results:', error);
+        return res.status(500).json({ message: 'Server error', error: error.message });
+      } finally {
+        if (connection) connection.release();
+      }
     }
     
     return res.status(201).json({ message: 'Quiz results saved successfully' });
@@ -296,32 +301,37 @@ app.get('/api/quiz/has-completed/:email', async (req, res) => {
       return res.status(200).json({ hasCompleted: false });
     }
     
-    const connection = await db.getConnection();
-    
-    // First get the user ID
-    const [users] = await connection.execute(
-      'SELECT id FROM users WHERE email = ?',
-      [email]
-    );
-    
-    if (users.length === 0) {
-      connection.release();
-      return res.status(200).json({ hasCompleted: false });
+    let connection;
+    try {
+      connection = await db.getConnection();
+      
+      // First get the user ID
+      const [users] = await connection.execute(
+        'SELECT id FROM users WHERE email = ?',
+        [email]
+      );
+      
+      if (users.length === 0) {
+        return res.status(200).json({ hasCompleted: false });
+      }
+      
+      const userId = users[0].id;
+      
+      // Then check if they have quiz results
+      const [results] = await connection.execute(
+        'SELECT COUNT(*) as count FROM quiz_results WHERE user_id = ?',
+        [userId]
+      );
+      
+      const hasCompleted = results[0].count > 0;
+      
+      return res.status(200).json({ hasCompleted });
+    } catch (error) {
+      console.error('Error checking quiz completion status:', error);
+      return res.status(500).json({ message: 'Server error', error: error.message });
+    } finally {
+      if (connection) connection.release();
     }
-    
-    const userId = users[0].id;
-    
-    // Then check if they have quiz results
-    const [results] = await connection.execute(
-      'SELECT COUNT(*) as count FROM quiz_results WHERE user_id = ?',
-      [userId]
-    );
-    
-    connection.release();
-    
-    const hasCompleted = results[0].count > 0;
-    
-    return res.status(200).json({ hasCompleted });
   } catch (error) {
     console.error('Error checking quiz completion status:', error);
     return res.status(500).json({ message: 'Server error', error: error.message });
@@ -344,24 +354,30 @@ app.get('/api/quiz/history', async (req, res) => {
     }
     
     const userId = req.session.user.id;
-    const connection = await db.getConnection();
-    
-    const [results] = await connection.execute(
-      'SELECT * FROM quiz_results WHERE user_id = ? ORDER BY created_at DESC',
-      [userId]
-    );
-    
-    connection.release();
-    
-    return res.status(200).json({
-      message: 'Quiz history retrieved successfully',
-      quizHistory: results.map(result => ({
-        id: result.id,
-        quizData: JSON.parse(result.quiz_data),
-        suggestedCareers: JSON.parse(result.suggested_careers),
-        createdAt: result.created_at
-      }))
-    });
+    let connection;
+    try {
+      connection = await db.getConnection();
+      
+      const [results] = await connection.execute(
+        'SELECT * FROM quiz_results WHERE user_id = ? ORDER BY created_at DESC',
+        [userId]
+      );
+      
+      return res.status(200).json({
+        message: 'Quiz history retrieved successfully',
+        quizHistory: results.map(result => ({
+          id: result.id,
+          quizData: JSON.parse(result.quiz_data),
+          suggestedCareers: JSON.parse(result.suggested_careers),
+          createdAt: result.created_at
+        }))
+      });
+    } catch (error) {
+      console.error('Error retrieving quiz history:', error);
+      return res.status(500).json({ message: 'Server error', error: error.message });
+    } finally {
+      if (connection) connection.release();
+    }
   } catch (error) {
     console.error('Error retrieving quiz history:', error);
     return res.status(500).json({ message: 'Server error', error: error.message });
@@ -378,29 +394,33 @@ app.post('/api/quiz/clear', async (req, res) => {
     const userId = req.session.user.id;
     const { grade } = req.body;
     
-    console.log(`Clearing quiz data for user ${userId} with grade ${grade}`);
-    
     if (!db.usingInMemoryStore) {
-      const connection = await db.getConnection();
-      
-      // Delete quiz results for this user
-      await connection.execute(
-        'DELETE FROM quiz_results WHERE user_id = ?',
-        [userId]
-      );
-      
-      // If grade is provided, update the user's grade
-      if (grade) {
+      let connection;
+      try {
+        connection = await db.getConnection();
+        
+        // Delete quiz results for this user
         await connection.execute(
-          'UPDATE users SET grade = ? WHERE id = ?',
-          [grade, userId]
+          'DELETE FROM quiz_results WHERE user_id = ?',
+          [userId]
         );
         
-        // Update session grade
-        req.session.user.grade = grade;
+        // If grade is provided, update the user's grade
+        if (grade) {
+          await connection.execute(
+            'UPDATE users SET grade = ? WHERE id = ?',
+            [grade, userId]
+          );
+          
+          // Update session grade
+          req.session.user.grade = grade;
+        }
+      } catch (error) {
+        console.error('Error clearing quiz data:', error);
+        return res.status(500).json({ message: 'Server error', error: error.message });
+      } finally {
+        if (connection) connection.release();
       }
-      
-      connection.release();
     } else {
       // In memory mode - just update session if grade provided
       if (grade) {
@@ -429,15 +449,21 @@ app.post('/api/roadmap/complete-step', async (req, res) => {
     const userId = req.session.user.id;
     
     if (!db.usingInMemoryStore) {
-      const connection = await db.getConnection();
-      
-      await connection.execute(
-        'INSERT INTO completed_steps (user_id, career_title, step_index) VALUES (?, ?, ?) ' +
-        'ON DUPLICATE KEY UPDATE completed_at = CURRENT_TIMESTAMP',
-        [userId, careerTitle, stepIndex]
-      );
-      
-      connection.release();
+      let connection;
+      try {
+        connection = await db.getConnection();
+        
+        await connection.execute(
+          'INSERT INTO completed_steps (user_id, career_title, step_index) VALUES (?, ?, ?) ' +
+          'ON DUPLICATE KEY UPDATE completed_at = CURRENT_TIMESTAMP',
+          [userId, careerTitle, stepIndex]
+        );
+      } catch (error) {
+        console.error('Error saving completed step:', error);
+        return res.status(500).json({ message: 'Server error', error: error.message });
+      } finally {
+        if (connection) connection.release();
+      }
     }
     
     return res.status(200).json({ message: 'Step marked as completed' });
@@ -458,14 +484,20 @@ app.delete('/api/roadmap/complete-step', async (req, res) => {
     const userId = req.session.user.id;
     
     if (!db.usingInMemoryStore) {
-      const connection = await db.getConnection();
-      
-      await connection.execute(
-        'DELETE FROM completed_steps WHERE user_id = ? AND career_title = ? AND step_index = ?',
-        [userId, careerTitle, stepIndex]
-      );
-      
-      connection.release();
+      let connection;
+      try {
+        connection = await db.getConnection();
+        
+        await connection.execute(
+          'DELETE FROM completed_steps WHERE user_id = ? AND career_title = ? AND step_index = ?',
+          [userId, careerTitle, stepIndex]
+        );
+      } catch (error) {
+        console.error('Error removing completed step:', error);
+        return res.status(500).json({ message: 'Server error', error: error.message });
+      } finally {
+        if (connection) connection.release();
+      }
     }
     
     return res.status(200).json({ message: 'Step marked as incomplete' });
@@ -493,19 +525,25 @@ app.get('/api/roadmap/completed-steps/:careerTitle', async (req, res) => {
     const { careerTitle } = req.params;
     const userId = req.session.user.id;
     
-    const connection = await db.getConnection();
-    
-    const [steps] = await connection.execute(
-      'SELECT step_index FROM completed_steps WHERE user_id = ? AND career_title = ?',
-      [userId, careerTitle]
-    );
-    
-    connection.release();
-    
-    return res.status(200).json({
-      message: 'Completed steps retrieved successfully',
-      completedSteps: steps.map(step => step.step_index)
-    });
+    let connection;
+    try {
+      connection = await db.getConnection();
+      
+      const [steps] = await connection.execute(
+        'SELECT step_index FROM completed_steps WHERE user_id = ? AND career_title = ?',
+        [userId, careerTitle]
+      );
+      
+      return res.status(200).json({
+        message: 'Completed steps retrieved successfully',
+        completedSteps: steps.map(step => step.step_index)
+      });
+    } catch (error) {
+      console.error('Error retrieving completed steps:', error);
+      return res.status(500).json({ message: 'Server error', error: error.message });
+    } finally {
+      if (connection) connection.release();
+    }
   } catch (error) {
     console.error('Error retrieving completed steps:', error);
     return res.status(500).json({ message: 'Server error', error: error.message });
@@ -550,22 +588,28 @@ app.put('/api/user/update', async (req, res) => {
     }
     
     if (!db.usingInMemoryStore) {
-      const connection = await db.getConnection();
-      
-      // Build the dynamic SQL to update only provided fields
-      const fieldsToUpdate = Object.keys(updateFields).map(field => `${field} = ?`).join(', ');
-      const values = [...Object.values(updateFields), userId];
-      
-      await connection.execute(
-        `UPDATE users SET ${fieldsToUpdate} WHERE id = ?`,
-        values
-      );
-      
-      connection.release();
-      
-      // Also update session data
-      for (const field of Object.keys(updateFields)) {
-        req.session.user[field] = updateFields[field];
+      let connection;
+      try {
+        connection = await db.getConnection();
+        
+        // Build the dynamic SQL to update only provided fields
+        const fieldsToUpdate = Object.keys(updateFields).map(field => `${field} = ?`).join(', ');
+        const values = [...Object.values(updateFields), userId];
+        
+        await connection.execute(
+          `UPDATE users SET ${fieldsToUpdate} WHERE id = ?`,
+          values
+        );
+        
+        // Also update session data
+        for (const field of Object.keys(updateFields)) {
+          req.session.user[field] = updateFields[field];
+        }
+      } catch (error) {
+        console.error('Error updating user profile:', error);
+        return res.status(500).json({ message: 'Server error', error: error.message });
+      } finally {
+        if (connection) connection.release();
       }
     } else {
       // In memory mode - just update the session
@@ -597,13 +641,46 @@ app.get('/api/healthcheck', (req, res) => {
   });
 });
 
-// Start the server
-const startServer = () => {
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Using ${db.usingInMemoryStore ? 'in-memory store' : 'MySQL database'}`);
+// Function to find an available port
+const findAvailablePort = (startPort) => {
+  return new Promise((resolve, reject) => {
+    let port = startPort;
+    const server = http.createServer();
+    
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.log(`Port ${port} is in use, trying ${port + 1}`);
+        port++;
+        server.listen(port);
+      } else {
+        reject(err);
+      }
+    });
+    
+    server.on('listening', () => {
+      server.close(() => {
+        console.log(`Found available port: ${port}`);
+        resolve(port);
+      });
+    });
+    
+    server.listen(port);
   });
 };
 
-// Delay server start to ensure database connection status is determined
-setTimeout(startServer, 1500); 
+// Start the server with port detection
+const startServer = async () => {
+  try {
+    // Try to find an available port
+    const availablePort = await findAvailablePort(PORT);
+    
+    app.listen(availablePort, () => {
+      console.log(`Server running on port ${availablePort}`);
+      console.log(`Using ${db.usingInMemoryStore ? 'in-memory store' : 'MySQL database'}`);
+    });
+  } catch (error) {
+    console.error('Error starting server:', error);
+  }
+};
+
+startServer(); 

@@ -1,6 +1,6 @@
 import { LOCAL_STORAGE_PREFIX } from '../constants';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = 'http://localhost:5002/api';
 
 // Helper function for API calls
 const apiCall = async (endpoint, method = 'GET', data = null) => {

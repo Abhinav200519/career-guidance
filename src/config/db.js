@@ -24,168 +24,27 @@ const inMemoryStore = {
 };
 
 // Flag to track if we're using the in-memory store
+// Changed to attempt database connection by default
 let usingInMemoryStore = false;
 
-// Create a pool with a lower connection timeout
 let pool;
+// Always attempt to create a pool
 try {
   pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'career_guidance',
+    database: process.env.DB_NAME || 'career_guidance_db',
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    connectTimeout: 3000 // Set a lower timeout for faster fallback
+    connectTimeout: 5000 // Increased timeout for more reliable connections
   });
+  console.log('MySQL pool created');
 } catch (error) {
   console.error('Error creating MySQL pool:', error);
   usingInMemoryStore = true;
 }
-
-// Test the connection immediately
-(async () => {
-  if (!usingInMemoryStore) {
-    try {
-      // Try to get a connection
-      const connection = await pool.getConnection();
-      // If we got here, connection is successful
-      console.log('Successfully connected to MySQL database');
-      connection.release();
-    } catch (error) {
-      console.error('MySQL connection failed:', error);
-      usingInMemoryStore = true;
-      console.log('Switching to in-memory store');
-    }
-  }
-})();
-
-// Mock connection for in-memory store
-const createMockConnection = () => {
-  return {
-    execute: async (query, params = []) => {
-      console.log('Executing mock query:', query.substring(0, 60) + '...');
-      
-      // Handle different queries
-      if (query.includes('INSERT INTO users')) {
-        const [name, email, password, grade] = params;
-        
-        // Check if user already exists in in-memory store
-        const existingUser = inMemoryStore.users.find(user => user.email === email);
-        if (existingUser) {
-          return [[existingUser]]; // User already exists
-        }
-        
-        const id = inMemoryStore.users.length + 1;
-        const newUser = { 
-          id, 
-          name, 
-          email, 
-          password, 
-          grade: parseInt(grade), 
-          created_at: new Date().toISOString() 
-        };
-        
-        inMemoryStore.users.push(newUser);
-        return [{ insertId: id }];
-      }
-      
-      if (query.includes('SELECT * FROM users WHERE email = ?')) {
-        const email = params[0];
-        const users = inMemoryStore.users.filter(user => user.email === email);
-        return [users];
-      }
-      
-      if (query.includes('SELECT * FROM users WHERE email = ? AND password = ?')) {
-        const [email, password] = params;
-        const users = inMemoryStore.users.filter(
-          user => user.email === email && user.password === password
-        );
-        return [users];
-      }
-      
-      if (query.includes('INSERT INTO quiz_results')) {
-        const [userId, quizData, suggestedCareers] = params;
-        const id = inMemoryStore.quizResults.length + 1;
-        
-        inMemoryStore.quizResults.push({
-          id,
-          user_id: userId,
-          quiz_data: quizData,
-          suggested_careers: suggestedCareers,
-          created_at: new Date().toISOString()
-        });
-        
-        return [{ insertId: id }];
-      }
-      
-      if (query.includes('SELECT * FROM quiz_results WHERE user_id = ?')) {
-        const userId = params[0];
-        const results = inMemoryStore.quizResults.filter(
-          result => result.user_id === userId
-        ).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-        
-        return [results];
-      }
-      
-      if (query.includes('INSERT INTO completed_steps')) {
-        const [userId, careerTitle, stepIndex] = params;
-        
-        // Check if step is already completed
-        const existingStep = inMemoryStore.completedSteps.find(
-          step => step.user_id === userId && 
-                 step.career_title === careerTitle && 
-                 step.step_index === stepIndex
-        );
-        
-        if (existingStep) {
-          existingStep.completed_at = new Date().toISOString();
-        } else {
-          const id = inMemoryStore.completedSteps.length + 1;
-          inMemoryStore.completedSteps.push({
-            id,
-            user_id: userId,
-            career_title: careerTitle,
-            step_index: stepIndex,
-            completed_at: new Date().toISOString()
-          });
-        }
-        
-        return [{ affectedRows: 1 }];
-      }
-      
-      if (query.includes('DELETE FROM completed_steps')) {
-        const [userId, careerTitle, stepIndex] = params;
-        
-        const initialLength = inMemoryStore.completedSteps.length;
-        inMemoryStore.completedSteps = inMemoryStore.completedSteps.filter(
-          step => !(step.user_id === userId && 
-                   step.career_title === careerTitle && 
-                   step.step_index === stepIndex)
-        );
-        
-        return [{ affectedRows: initialLength - inMemoryStore.completedSteps.length }];
-      }
-      
-      if (query.includes('SELECT step_index FROM completed_steps')) {
-        const [userId, careerTitle] = params;
-        
-        const steps = inMemoryStore.completedSteps.filter(
-          step => step.user_id === userId && step.career_title === careerTitle
-        ).map(step => ({ step_index: step.step_index }));
-        
-        return [steps];
-      }
-      
-      // Default empty response for unhandled queries
-      return [[]];
-    },
-    release: () => {
-      // Mock release method
-    }
-  };
-};
 
 // Initialize database with required tables
 const initializeDb = async () => {
@@ -277,8 +136,153 @@ const initializeDb = async () => {
   }
 };
 
-// Delay initialization slightly to allow connection check to complete first
-setTimeout(initializeDb, 1000);
+// Test connection and initialize DB
+(async () => {
+  try {
+    // Try to get a connection
+    const connection = await pool.getConnection();
+    console.log('Successfully connected to MySQL database');
+    connection.release();
+    
+    // Initialize DB right away once connection is confirmed
+    await initializeDb();
+  } catch (error) {
+    console.error('MySQL connection failed:', error);
+    usingInMemoryStore = true;
+    console.log('Switching to in-memory store');
+  }
+})();
+
+// Mock connection for in-memory store
+const createMockConnection = () => {
+  return {
+    execute: async (query, params = []) => {
+      // Only log in development mode or reduce logging verbosity
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Executing mock query:', query.substring(0, 40) + '...');
+      }
+      
+      // Handle different queries
+      if (query.includes('INSERT INTO users')) {
+        const [name, email, password, grade] = params;
+        
+        // Check if user already exists in in-memory store
+        const existingUser = inMemoryStore.users.find(user => user.email === email);
+        if (existingUser) {
+          return [[existingUser]]; // User already exists
+        }
+        
+        const id = inMemoryStore.users.length + 1;
+        const newUser = { 
+          id, 
+          name, 
+          email, 
+          password, 
+          grade: parseInt(grade), 
+          created_at: new Date().toISOString() 
+        };
+        
+        inMemoryStore.users.push(newUser);
+        return [{ insertId: id }];
+      }
+      
+      if (query.includes('SELECT * FROM users WHERE email = ?')) {
+        const email = params[0];
+        const users = inMemoryStore.users.filter(user => user.email === email);
+        return [users];
+      }
+      
+      if (query.includes('SELECT * FROM users WHERE email = ? AND password = ?')) {
+        const [email, password] = params;
+        const users = inMemoryStore.users.filter(
+          user => user.email === email && user.password === password
+        );
+        return [users];
+      }
+      
+      if (query.includes('INSERT INTO quiz_results')) {
+        const [userId, quizData, suggestedCareers] = params;
+        // Remove any existing result for this user
+        inMemoryStore.quizResults = inMemoryStore.quizResults.filter(
+          result => result.user_id !== userId
+        );
+        const id = inMemoryStore.quizResults.length + 1;
+        inMemoryStore.quizResults.push({
+          id,
+          user_id: userId,
+          quiz_data: quizData,
+          suggested_careers: suggestedCareers,
+          created_at: new Date().toISOString()
+        });
+        return [{ insertId: id }];
+      }
+      
+      if (query.includes('SELECT * FROM quiz_results WHERE user_id = ?')) {
+        const userId = params[0];
+        const results = inMemoryStore.quizResults.filter(
+          result => result.user_id === userId
+        ).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        
+        return [results];
+      }
+      
+      if (query.includes('INSERT INTO completed_steps')) {
+        const [userId, careerTitle, stepIndex] = params;
+        
+        // Check if step is already completed
+        const existingStep = inMemoryStore.completedSteps.find(
+          step => step.user_id === userId && 
+                 step.career_title === careerTitle && 
+                 step.step_index === stepIndex
+        );
+        
+        if (existingStep) {
+          existingStep.completed_at = new Date().toISOString();
+        } else {
+          const id = inMemoryStore.completedSteps.length + 1;
+          inMemoryStore.completedSteps.push({
+            id,
+            user_id: userId,
+            career_title: careerTitle,
+            step_index: stepIndex,
+            completed_at: new Date().toISOString()
+          });
+        }
+        
+        return [{ affectedRows: 1 }];
+      }
+      
+      if (query.includes('DELETE FROM completed_steps')) {
+        const [userId, careerTitle, stepIndex] = params;
+        
+        const initialLength = inMemoryStore.completedSteps.length;
+        inMemoryStore.completedSteps = inMemoryStore.completedSteps.filter(
+          step => !(step.user_id === userId && 
+                   step.career_title === careerTitle && 
+                   step.step_index === stepIndex)
+        );
+        
+        return [{ affectedRows: initialLength - inMemoryStore.completedSteps.length }];
+      }
+      
+      if (query.includes('SELECT step_index FROM completed_steps')) {
+        const [userId, careerTitle] = params;
+        
+        const steps = inMemoryStore.completedSteps.filter(
+          step => step.user_id === userId && step.career_title === careerTitle
+        ).map(step => ({ step_index: step.step_index }));
+        
+        return [steps];
+      }
+      
+      // Default empty response for unhandled queries
+      return [[]];
+    },
+    release: () => {
+      // Mock release method
+    }
+  };
+};
 
 // Export getConnection function that works with either real pool or mock connection
 export const getConnection = async () => {
